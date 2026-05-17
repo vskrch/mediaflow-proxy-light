@@ -11,6 +11,7 @@ pub mod maxstream;
 pub mod mixdrop;
 pub mod okru;
 pub mod sportsonline;
+pub mod streamhg;
 pub mod streamtape;
 pub mod streamwish;
 pub mod supervideo;

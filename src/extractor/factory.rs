@@ -9,8 +9,8 @@ use crate::extractor::{
         fastream::FastreamExtractor, filelions::FileLionsExtractor, filemoon::FileMoonExtractor,
         gupload::GuploadExtractor, livetv::LiveTVExtractor, lulustream::LuluStreamExtractor,
         maxstream::MaxstreamExtractor, mixdrop::MixdropExtractor, okru::OkruExtractor,
-        sportsonline::SportsonlineExtractor, streamtape::StreamtapeExtractor,
-        streamwish::StreamWishExtractor, supervideo::SupervideoExtractor,
+        sportsonline::SportsonlineExtractor, streamhg::StreamHGExtractor,
+        streamtape::StreamtapeExtractor, streamwish::StreamWishExtractor, supervideo::SupervideoExtractor,
         turbovidplay::TurboVidPlayExtractor, uqload::UqloadExtractor, vavoo::VavooExtractor,
         vidfast::VidFastExtractor, vidmoly::VidmolyExtractor, vidoza::VidozaExtractor,
         vixcloud::VixCloudExtractor, voe::VoeExtractor,
@@ -76,6 +76,7 @@ pub fn get_extractor(
         "fastream"     => FastreamExtractor,
         "voe"          => VoeExtractor,
         "sportsonline" => SportsonlineExtractor,
+        "streamhg"     => StreamHGExtractor,
         "vidfast"      => VidFastExtractor,
     );
 
