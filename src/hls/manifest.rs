@@ -169,6 +169,13 @@ impl ManifestProcessor {
     ///
     /// Returns the modified playlist as a `String`.
     pub fn process(&self, content: &[u8], source_url: &str) -> String {
+        // IPTV-style playlists use non-standard EXTINF attributes (group-title=,
+        // tvg-id=, tvg-logo=, etc.) that m3u8-rs strips when serializing back.
+        // Route them directly to the line-by-line processor to preserve all metadata.
+        if is_iptv_playlist(content) {
+            return self
+                .process_lines(std::str::from_utf8(content).unwrap_or_default(), source_url);
+        }
         match m3u8_rs::parse_playlist_res(content) {
             Ok(Playlist::MasterPlaylist(pl)) => self.process_master(pl, source_url),
             Ok(Playlist::MediaPlaylist(pl)) => self.process_media(pl, source_url),
@@ -609,6 +616,23 @@ fn is_playlist_url(url: &str) -> bool {
     lower.ends_with(".m3u8") || lower.ends_with(".m3u")
 }
 
+/// Returns true if the content is an IPTV-style extended m3u8 playlist that
+/// carries non-standard EXTINF attributes (group-title=, tvg-id=, tvg-name=,
+/// tvg-logo=).  m3u8-rs parses these successfully but strips the custom
+/// attributes on write_to, so we must use the line-by-line fallback to
+/// preserve all metadata.
+fn is_iptv_playlist(content: &[u8]) -> bool {
+    let text = std::str::from_utf8(content).unwrap_or_default();
+    text.lines().any(|line| {
+        let t = line.trim();
+        t.starts_with("#EXTINF:")
+            && (t.contains("group-title=")
+                || t.contains("tvg-id=")
+                || t.contains("tvg-name=")
+                || t.contains("tvg-logo="))
+    })
+}
+
 /// Inject `#EXT-X-START:TIME-OFFSET=<offset>,PRECISE=YES` right after `#EXTM3U`.
 fn inject_ext_x_start(content: &str, offset: f64) -> String {
     if let Some(pos) = content.find("#EXTM3U") {
@@ -943,6 +967,43 @@ mod tests {
             !result.contains("URI=\"https://upstream.example.com/playlist?type=audio"),
             "Audio URI is still bare. Got:\n{}",
             result
+        );
+    }
+
+    /// IPTV-style m3u8 playlists use non-standard EXTINF attributes that m3u8-rs
+    /// strips on write_to.  The proxy must preserve group-title, tvg-id, etc.
+    /// so that IPTV players can group channels correctly (issue #21).
+    #[test]
+    fn test_iptv_playlist_preserves_extinf_attributes() {
+        let processor = ManifestProcessor::new(
+            "http://proxy:8888",
+            ProxyParams::new("secret", HashMap::new()),
+            ManifestOptions {
+                force_playlist_proxy: true,
+                ..Default::default()
+            },
+        );
+        let m3u8 = concat!(
+            "#EXTM3U x-tvg-url=\"http://epg.example.com/epg.xml\"\n",
+            "#EXTINF:-1 tvg-id=\"ch1\" tvg-name=\"Channel 1\" tvg-logo=\"http://logo.example.com/ch1.png\" group-title=\"Sports\",Channel 1\n",
+            "http://stream.example.com/ch1\n",
+            "#EXTINF:-1 tvg-id=\"ch2\" tvg-name=\"Channel 2\" tvg-logo=\"http://logo.example.com/ch2.png\" group-title=\"News\",Channel 2\n",
+            "http://stream.example.com/ch2\n",
+        );
+
+        let result = processor.process(m3u8.as_bytes(), "http://upstream.example.com/playlist.m3u8");
+
+        assert!(result.contains("group-title=\"Sports\""), "group-title stripped:\n{result}");
+        assert!(result.contains("group-title=\"News\""), "group-title stripped:\n{result}");
+        assert!(result.contains("tvg-id=\"ch1\""), "tvg-id stripped:\n{result}");
+        assert!(result.contains("tvg-name=\"Channel 1\""), "tvg-name stripped:\n{result}");
+        assert!(result.contains("tvg-logo="), "tvg-logo stripped:\n{result}");
+        // Channel URLs must be proxied through manifest endpoint
+        assert!(result.contains("/proxy/hls/manifest"), "URLs not proxied:\n{result}");
+        // Must not contain bare stream URLs
+        assert!(
+            !result.contains("http://stream.example.com/ch1\n"),
+            "bare stream URL present:\n{result}"
         );
     }
 
