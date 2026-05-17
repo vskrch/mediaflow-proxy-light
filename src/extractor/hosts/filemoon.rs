@@ -83,8 +83,9 @@ fn decrypt_playback(playback: &serde_json::Value) -> Result<serde_json::Value, E
         .decrypt(nonce, payload_bytes.as_ref())
         .map_err(|_| ExtractorError::extract("AES-256-GCM decryption failed"))?;
 
-    let json: serde_json::Value = serde_json::from_slice(&plaintext)
-        .map_err(|e| ExtractorError::extract(format!("JSON parse of decrypted payload failed: {e}")))?;
+    let json: serde_json::Value = serde_json::from_slice(&plaintext).map_err(|e| {
+        ExtractorError::extract(format!("JSON parse of decrypted payload failed: {e}"))
+    })?;
 
     Ok(json)
 }
@@ -168,7 +169,9 @@ impl Extractor for FileMoonExtractor {
         let hls_source = sources
             .iter()
             .find(|s| s["mime_type"].as_str() == Some("application/vnd.apple.mpegurl"))
-            .ok_or_else(|| ExtractorError::extract("FileMoon: no HLS source found in decrypted playback"))?;
+            .ok_or_else(|| {
+                ExtractorError::extract("FileMoon: no HLS source found in decrypted playback")
+            })?;
 
         let destination_url = hls_source["url"]
             .as_str()

@@ -10,10 +10,11 @@ use crate::extractor::{
         gupload::GuploadExtractor, livetv::LiveTVExtractor, lulustream::LuluStreamExtractor,
         maxstream::MaxstreamExtractor, mixdrop::MixdropExtractor, okru::OkruExtractor,
         sportsonline::SportsonlineExtractor, streamhg::StreamHGExtractor,
-        streamtape::StreamtapeExtractor, streamwish::StreamWishExtractor, supervideo::SupervideoExtractor,
-        turbovidplay::TurboVidPlayExtractor, uqload::UqloadExtractor, vavoo::VavooExtractor,
-        vidfast::VidFastExtractor, vidmoly::VidmolyExtractor, vidoza::VidozaExtractor,
-        vixcloud::VixCloudExtractor, voe::VoeExtractor,
+        streamtape::StreamtapeExtractor, streamwish::StreamWishExtractor,
+        supervideo::SupervideoExtractor, turbovidplay::TurboVidPlayExtractor,
+        uqload::UqloadExtractor, vavoo::VavooExtractor, vidfast::VidFastExtractor,
+        vidmoly::VidmolyExtractor, vidoza::VidozaExtractor, vixcloud::VixCloudExtractor,
+        voe::VoeExtractor,
     },
 };
 

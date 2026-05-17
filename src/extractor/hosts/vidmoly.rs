@@ -49,7 +49,11 @@ impl Extractor for VidmolyExtractor {
              (KHTML, like Gecko) Chrome/120 Safari/537.36"
                 .to_string(),
         );
-        headers.insert("accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".to_string());
+        headers.insert(
+            "accept".to_string(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                .to_string(),
+        );
         headers.insert("accept-language".to_string(), "en-US,en;q=0.5".to_string());
         headers.insert("connection".to_string(), "keep-alive".to_string());
         headers.insert("referer".to_string(), url.to_string());

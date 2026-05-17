@@ -25,20 +25,16 @@ fn strip_comments_re() -> &'static Regex {
 fn strip_hidden_divs_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r#"(?si)<div[^>]*style=["'][^"']*display\s*:\s*none[^"']*["'][^>]*>.*?</div>"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?si)<div[^>]*style=["'][^"']*display\s*:\s*none[^"']*["'][^>]*>.*?</div>"#)
+            .unwrap()
     })
 }
 
 fn buttok_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r#"(?i)href=["'](https?://[^"']+)["'][^>]*>\s*<button[^>]*id=["']buttok["']"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?i)href=["'](https?://[^"']+)["'][^>]*>\s*<button[^>]*id=["']buttok["']"#)
+            .unwrap()
     })
 }
 
@@ -62,25 +58,19 @@ fn uprots_re() -> &'static Regex {
 fn stayonline_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r#"https?://(?:www\.)?(?:stayonline\.pro|maxstream\.video)[^"'\s<>\\]+"#,
-        )
-        .unwrap()
+        Regex::new(r#"https?://(?:www\.)?(?:stayonline\.pro|maxstream\.video)[^"'\s<>\\]+"#)
+            .unwrap()
     })
 }
 
 fn window_location_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"window\.location(?:\.href)?\s*=\s*["']([^"']+)["']"#).unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r#"window\.location(?:\.href)?\s*=\s*["']([^"']+)["']"#).unwrap())
 }
 
 fn meta_refresh_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"(?i)content=["']0;\s*url=([^"']+)["']"#).unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r#"(?i)content=["']0;\s*url=([^"']+)["']"#).unwrap())
 }
 
 fn direct_sources_re() -> &'static Regex {
@@ -336,10 +326,7 @@ impl Extractor for MaxstreamExtractor {
         // Fetch the player page.
         let mut extra_hdrs = HeaderMap::new();
         if let Ok(v) = HeaderValue::from_str("en-US,en;q=0.5") {
-            extra_hdrs.insert(
-                HeaderName::from_static("accept-language"),
-                v,
-            );
+            extra_hdrs.insert(HeaderName::from_static("accept-language"), v);
         }
         let resp = self
             .chrome_client

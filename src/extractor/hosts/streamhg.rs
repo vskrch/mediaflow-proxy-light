@@ -49,8 +49,9 @@ impl Extractor for StreamHGExtractor {
         } else if is_packed(&html) {
             let unpacked = unpack_packed_js(&html)
                 .ok_or_else(|| ExtractorError::extract("StreamHG: failed to unpack JS"))?;
-            Self::find_hls2(&unpacked)
-                .ok_or_else(|| ExtractorError::extract("StreamHG: hls2 URL not found after unpack"))?
+            Self::find_hls2(&unpacked).ok_or_else(|| {
+                ExtractorError::extract("StreamHG: hls2 URL not found after unpack")
+            })?
         } else {
             return Err(ExtractorError::extract("StreamHG: hls2 URL not found"));
         };
