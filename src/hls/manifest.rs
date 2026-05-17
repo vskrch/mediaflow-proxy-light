@@ -991,15 +991,31 @@ mod tests {
             "http://stream.example.com/ch2\n",
         );
 
-        let result = processor.process(m3u8.as_bytes(), "http://upstream.example.com/playlist.m3u8");
+        let result =
+            processor.process(m3u8.as_bytes(), "http://upstream.example.com/playlist.m3u8");
 
-        assert!(result.contains("group-title=\"Sports\""), "group-title stripped:\n{result}");
-        assert!(result.contains("group-title=\"News\""), "group-title stripped:\n{result}");
-        assert!(result.contains("tvg-id=\"ch1\""), "tvg-id stripped:\n{result}");
-        assert!(result.contains("tvg-name=\"Channel 1\""), "tvg-name stripped:\n{result}");
+        assert!(
+            result.contains("group-title=\"Sports\""),
+            "group-title stripped:\n{result}"
+        );
+        assert!(
+            result.contains("group-title=\"News\""),
+            "group-title stripped:\n{result}"
+        );
+        assert!(
+            result.contains("tvg-id=\"ch1\""),
+            "tvg-id stripped:\n{result}"
+        );
+        assert!(
+            result.contains("tvg-name=\"Channel 1\""),
+            "tvg-name stripped:\n{result}"
+        );
         assert!(result.contains("tvg-logo="), "tvg-logo stripped:\n{result}");
         // Channel URLs must be proxied through manifest endpoint
-        assert!(result.contains("/proxy/hls/manifest"), "URLs not proxied:\n{result}");
+        assert!(
+            result.contains("/proxy/hls/manifest"),
+            "URLs not proxied:\n{result}"
+        );
         // Must not contain bare stream URLs
         assert!(
             !result.contains("http://stream.example.com/ch1\n"),
