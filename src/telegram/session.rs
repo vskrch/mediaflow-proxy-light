@@ -6,8 +6,9 @@
 //! On the first request that requires Telegram access the client is connected
 //! lazily and cached for the lifetime of the process.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 #[cfg(feature = "telegram")]
 use {
@@ -35,6 +36,75 @@ static CLIENT: OnceLock<Arc<Mutex<Option<Arc<Client>>>>> = OnceLock::new();
 #[cfg(feature = "telegram")]
 fn client_mutex() -> Arc<Mutex<Option<Arc<Client>>>> {
     CLIENT.get_or_init(|| Arc::new(Mutex::new(None))).clone()
+}
+
+/// In-memory cache: channel_id (without the -100 prefix) → access_hash.
+/// Populated lazily from `messages.GetDialogs` on first channel access.
+#[cfg(feature = "telegram")]
+static CHANNEL_CACHE: OnceLock<Arc<RwLock<HashMap<i64, i64>>>> = OnceLock::new();
+
+#[cfg(feature = "telegram")]
+fn channel_cache() -> Arc<RwLock<HashMap<i64, i64>>> {
+    CHANNEL_CACHE
+        .get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+        .clone()
+}
+
+/// Scan the user's recent dialogs and populate the channel access_hash cache.
+/// Returns the access_hash for `target_channel_id` if found, otherwise `None`.
+#[cfg(feature = "telegram")]
+async fn fetch_and_cache_channel_hashes(client: &Client, target_channel_id: i64) -> Option<i64> {
+    let result = client
+        .invoke(&tl::functions::messages::GetDialogs {
+            exclude_pinned: false,
+            folder_id: None,
+            offset_date: 0,
+            offset_id: 0,
+            offset_peer: tl::enums::InputPeer::Empty,
+            limit: 200,
+            hash: 0,
+        })
+        .await
+        .ok()?;
+
+    let chats: &[tl::enums::Chat] = match &result {
+        tl::enums::messages::Dialogs::Dialogs(d) => &d.chats,
+        tl::enums::messages::Dialogs::Slice(d) => &d.chats,
+        tl::enums::messages::Dialogs::NotModified(_) => return None,
+    };
+
+    let cache = channel_cache();
+    let mut write = cache.write().await;
+    let mut found = None;
+
+    for chat in chats {
+        if let tl::enums::Chat::Channel(ch) = chat {
+            if let Some(hash) = ch.access_hash {
+                write.insert(ch.id, hash);
+                if ch.id == target_channel_id {
+                    found = Some(hash);
+                }
+            }
+        }
+    }
+
+    found
+}
+
+/// Resolve the access_hash for a channel ID.
+/// Checks the in-memory cache first; falls back to a dialog scan on cache miss.
+#[cfg(feature = "telegram")]
+async fn resolve_channel_access_hash(client: &Client, channel_id: i64) -> Option<i64> {
+    // Fast path: cache hit
+    {
+        let cache = channel_cache();
+        let read = cache.read().await;
+        if let Some(&hash) = read.get(&channel_id) {
+            return Some(hash);
+        }
+    }
+    // Cache miss: scan dialogs and populate cache
+    fetch_and_cache_channel_hashes(client, channel_id).await
 }
 
 // ---------------------------------------------------------------------------
@@ -155,10 +225,16 @@ pub async fn resolve_peer_from_str(client: &Client, chat_id: &str) -> Option<tl:
         if id < 0 {
             let abs = -id;
             if abs > 1_000_000_000 {
-                // -100XXXXXXXXXX → channel
+                // -100XXXXXXXXXX → supergroup / channel
+                let channel_id = abs - 1_000_000_000;
+                // Resolve real access_hash; without it Telegram rejects requests
+                // for private channels even when the session has membership.
+                let access_hash = resolve_channel_access_hash(client, channel_id)
+                    .await
+                    .unwrap_or(0);
                 return Some(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-                    channel_id: abs - 1_000_000_000,
-                    access_hash: 0,
+                    channel_id,
+                    access_hash,
                 }));
             } else {
                 return Some(tl::enums::InputPeer::Chat(tl::types::InputPeerChat {
@@ -384,16 +460,29 @@ pub async fn get_fresh_document_info(
 ) -> Option<FreshFileLocation> {
     let peer = resolve_peer_from_str(&client, chat_id).await?;
 
-    // Fast path: direct lookup if we have the message_id
+    // Fast path: direct lookup if we have the message_id (channel-aware)
     if let Some(mid) = message_id {
-        if let Ok(result) = client
-            .invoke(&tl::functions::messages::GetMessages {
-                id: vec![tl::enums::InputMessage::Id(tl::types::InputMessageId {
-                    id: mid,
-                })],
-            })
-            .await
-        {
+        let input_msg =
+            tl::enums::InputMessage::Id(tl::types::InputMessageId { id: mid });
+        let fast_result = match &peer {
+            tl::enums::InputPeer::Channel(ch) => client
+                .invoke(&tl::functions::channels::GetMessages {
+                    channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                        channel_id: ch.channel_id,
+                        access_hash: ch.access_hash,
+                    }),
+                    id: vec![input_msg],
+                })
+                .await
+                .ok(),
+            _ => client
+                .invoke(&tl::functions::messages::GetMessages {
+                    id: vec![input_msg],
+                })
+                .await
+                .ok(),
+        };
+        if let Some(result) = fast_result {
             if let Some(info) = extract_doc_info_from_msgs(&result, document_id) {
                 info!(
                     "Got fresh doc info via GetMessages (message_id={}): fref={}, dc={}, doc_id={}",
