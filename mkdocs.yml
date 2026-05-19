@@ -46,6 +46,7 @@ nav:
       - Docker build optimization: DOCKER_OPTIMIZATION.md
   - Usage:
       - Overview & endpoints: usage/overview.md
+      - Forward proxy: usage/forward.md
       - EPG proxy: usage/epg-proxy.md
       - Video extractor: usage/extractor.md
       - Xtream Codes proxy: usage/xtream.md
