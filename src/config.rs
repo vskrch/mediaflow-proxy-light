@@ -408,6 +408,63 @@ pub struct ExtractorConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Forward config
+// ---------------------------------------------------------------------------
+
+fn default_forward_max_request_body_bytes() -> usize {
+    50 * 1024 * 1024 // 50 MB — allows NZB/torrent file uploads
+}
+
+fn default_forward_max_response_body_bytes() -> usize {
+    10 * 1024 * 1024 // 10 MB — API JSON responses
+}
+
+fn default_forward_response_body_timeout_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ForwardConfig {
+    /// Optional allowlist of hostnames. Empty = allow any host.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Extra denied hostnames (in addition to automatic private-IP guard).
+    #[serde(default)]
+    pub denied_hosts: Vec<String>,
+    /// Maximum incoming request body (upload) size in bytes. Default 50 MB.
+    #[serde(default = "default_forward_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
+    /// Maximum upstream response body size in bytes. Default 10 MB.
+    /// Legacy config key `max_body_bytes` is accepted as an alias.
+    #[serde(
+        default = "default_forward_max_response_body_bytes",
+        alias = "max_body_bytes"
+    )]
+    pub max_response_body_bytes: usize,
+    /// Timeout in seconds for reading the upstream response body. Default 30 s.
+    #[serde(default = "default_forward_response_body_timeout_secs")]
+    pub response_body_timeout_secs: u64,
+    /// MediaFlow's own public IP. When set, substitutes `{mediaflow_ip}` in
+    /// forwarded request URLs and bodies so debrid services receive a consistent
+    /// `ip=` parameter matching the TCP source IP. Auto-detected at startup if unset.
+    #[serde(default)]
+    pub public_ip: Option<String>,
+}
+
+impl Default for ForwardConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            denied_hosts: Vec::new(),
+            max_request_body_bytes: default_forward_max_request_body_bytes(),
+            max_response_body_bytes: default_forward_max_response_body_bytes(),
+            response_body_timeout_secs: default_forward_response_body_timeout_secs(),
+            public_ip: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root config
 // ---------------------------------------------------------------------------
 
@@ -434,6 +491,8 @@ pub struct Config {
     pub epg: EpgConfig,
     #[serde(default)]
     pub extractor: ExtractorConfig,
+    #[serde(default)]
+    pub forward: ForwardConfig,
     /// Log filter directive (e.g. "debug", "info", "mediaflow_proxy_light=debug,info").
     /// Overrides the RUST_LOG env var when set.
     #[serde(default = "default_log_level")]

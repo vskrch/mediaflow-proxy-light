@@ -1,5 +1,6 @@
 use actix_web::{
     body::SizedStream,
+    http::StatusCode,
     web::{self, Bytes},
     HttpRequest, HttpResponse,
 };
@@ -7,15 +8,18 @@ use futures::{stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::boxed::Box;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 use serde::Deserialize;
 
 use crate::{
     auth::{encryption::ProxyData, EncryptionHandler},
+    config::ForwardConfig,
     error::{AppError, AppResult},
     metrics::AppMetrics,
     models::request::{GenerateUrlRequest, SUPPORTED_REQUEST_HEADERS, SUPPORTED_RESPONSE_HEADERS},
@@ -222,6 +226,256 @@ pub async fn proxy_stream_head(
     handle_proxy_request(req, stream_manager, proxy_data, metrics, true, destination).await
 }
 
+// Headers that must not be forwarded upstream (they'd leak the caller's IP).
+const IP_DISCLOSURE_HEADERS: &[&str] = &[
+    "x-forwarded-for",
+    "x-real-ip",
+    "x-client-ip",
+    "true-client-ip",
+    "forwarded",
+    "cf-connecting-ip",
+    "x-original-forwarded-for",
+    "x-cluster-client-ip",
+];
+
+// Hop-by-hop headers that must not be propagated to/from the upstream.
+const HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+];
+
+// Headers that callers must not inject via h_* params — they enable host-header
+// injection, HTTP request smuggling, or break reqwest's own framing logic.
+const BLOCKED_REQUEST_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "content-encoding",
+];
+
+fn check_forward_destination(url: &str, cfg: &ForwardConfig) -> AppResult<()> {
+    let parsed = Url::parse(url)
+        .map_err(|_| AppError::BadRequest(format!("Invalid destination URL: {url}")))?;
+
+    // Only allow http(s) — blocks file://, ftp://, gopher://, etc.
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(AppError::BadRequest(format!(
+            "Invalid URL scheme '{scheme}'. Only http and https are allowed."
+        )));
+    }
+
+    let hostname = parsed.host_str().unwrap_or("").to_lowercase();
+    if hostname.is_empty() {
+        return Err(AppError::BadRequest(
+            "Invalid destination URL: no hostname".into(),
+        ));
+    }
+
+    // Allowlist check
+    if !cfg.allowed_hosts.is_empty() {
+        let allowed: std::collections::HashSet<_> =
+            cfg.allowed_hosts.iter().map(|h| h.to_lowercase()).collect();
+        if !allowed.contains(&hostname) {
+            return Err(AppError::Forbidden(format!(
+                "Host '{hostname}' is not in forward_allowed_hosts"
+            )));
+        }
+    }
+
+    // Denylist check
+    let denied: std::collections::HashSet<_> =
+        cfg.denied_hosts.iter().map(|h| h.to_lowercase()).collect();
+    if denied.contains(&hostname) {
+        return Err(AppError::Forbidden(format!("Host '{hostname}' is denied")));
+    }
+
+    // Block loopback hostnames
+    if matches!(
+        hostname.as_str(),
+        "localhost" | "ip6-localhost" | "ip6-loopback"
+    ) {
+        return Err(AppError::Forbidden(
+            "Forwarding to localhost is not allowed".into(),
+        ));
+    }
+
+    // Block private/loopback/link-local IPs given as literals
+    if let Ok(addr) = hostname.parse::<IpAddr>() {
+        if addr.is_loopback() || addr.is_multicast() || is_private_ip(&addr) {
+            return Err(AppError::Forbidden(
+                "Forwarding to private/loopback addresses is not allowed".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(addr: &IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_unspecified(),
+        IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || {
+                    // fc00::/7 — unique local
+                    let octets = v6.octets();
+                    (octets[0] & 0xfe) == 0xfc
+                }
+                || {
+                    // fe80::/10 — link-local
+                    let octets = v6.octets();
+                    (octets[0] == 0xfe) && ((octets[1] & 0xc0) == 0x80)
+                }
+        }
+    }
+}
+
+pub async fn proxy_forward(
+    req: HttpRequest,
+    body: Bytes,
+    stream_manager: web::Data<StreamManager>,
+    proxy_data: web::ReqData<ProxyData>,
+    forward_cfg: web::Data<ForwardConfig>,
+) -> AppResult<HttpResponse> {
+    let destination = if !proxy_data.destination.is_empty() {
+        decode_base64_url(&proxy_data.destination).unwrap_or_else(|| proxy_data.destination.clone())
+    } else {
+        return Err(AppError::BadRequest(
+            "Missing destination URL. Provide `d=<url>` query param or an encrypted token.".into(),
+        ));
+    };
+
+    check_forward_destination(&destination, &forward_cfg)?;
+
+    // Substitute {mediaflow_ip} with MediaFlow's own public IP so debrid services
+    // receive a consistent ip= parameter that matches the TCP source IP.
+    const IP_PLACEHOLDER: &str = "{mediaflow_ip}";
+    let (destination, body) = if let Some(ref public_ip) = forward_cfg.public_ip {
+        let new_dest = if destination.contains(IP_PLACEHOLDER) {
+            destination.replace(IP_PLACEHOLDER, public_ip)
+        } else {
+            destination
+        };
+        let new_body = if !body.is_empty()
+            && body
+                .windows(IP_PLACEHOLDER.len())
+                .any(|w| w == IP_PLACEHOLDER.as_bytes())
+        {
+            // Binary-safe byte-level replacement — no UTF-8 conversion that could
+            // corrupt multipart or other binary payloads.
+            let needle = IP_PLACEHOLDER.as_bytes();
+            let replacement = public_ip.as_bytes();
+            let mut out: Vec<u8> = Vec::with_capacity(body.len());
+            let mut i = 0;
+            while i < body.len() {
+                if body[i..].starts_with(needle) {
+                    out.extend_from_slice(replacement);
+                    i += needle.len();
+                } else {
+                    out.push(body[i]);
+                    i += 1;
+                }
+            }
+            Bytes::from(out)
+        } else {
+            body
+        };
+        (new_dest, new_body)
+    } else {
+        (destination, body)
+    };
+
+    // Build outbound headers from proxy_data (h_* params), stripping IP-disclosure ones.
+    let mut request_headers = HeaderMap::new();
+    if let Some(custom_headers) = &proxy_data.request_headers {
+        for (key, value) in custom_headers
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+        {
+            let key_lower = key.to_lowercase();
+            if IP_DISCLOSURE_HEADERS.contains(&key_lower.as_str()) {
+                continue;
+            }
+            if HOP_BY_HOP_HEADERS.contains(&key_lower.as_str()) {
+                continue;
+            }
+            if BLOCKED_REQUEST_HEADERS.contains(&key_lower.as_str()) {
+                continue;
+            }
+            if let Some(value_str) = value.as_str() {
+                if let (Ok(name), Ok(val)) =
+                    (HeaderName::from_str(key), HeaderValue::from_str(value_str))
+                {
+                    request_headers.insert(name, val);
+                }
+            }
+        }
+    }
+
+    if body.len() > forward_cfg.max_request_body_bytes {
+        return Err(AppError::BadRequest("Request body too large".into()));
+    }
+
+    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+
+    let upstream = stream_manager
+        .forward_request(method, destination, request_headers, body)
+        .await?;
+
+    let upstream_status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+    let upstream_headers = upstream.headers().clone();
+
+    // Read body with size cap and timeout
+    let resp_bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(forward_cfg.response_body_timeout_secs),
+        upstream.bytes(),
+    )
+    .await
+    .map_err(|_| AppError::Proxy("Upstream response body timed out".into()))?
+    .map_err(|e| AppError::Proxy(format!("Failed to read upstream body: {e}")))?;
+
+    if resp_bytes.len() > forward_cfg.max_response_body_bytes {
+        return Err(AppError::Proxy("Upstream response too large".into()));
+    }
+
+    let mut response = HttpResponse::build(upstream_status);
+
+    // Forward upstream headers, skipping hop-by-hop
+    for (k, v) in &upstream_headers {
+        let k_lower = k.as_str().to_lowercase();
+        if HOP_BY_HOP_HEADERS.contains(&k_lower.as_str()) {
+            continue;
+        }
+        if let Ok(converted) = actix_web::http::header::HeaderValue::from_bytes(v.as_bytes()) {
+            response.insert_header((k.as_str(), converted));
+        }
+    }
+
+    // Apply response header overrides from proxy_data (r_* params)
+    if let Some(custom_headers) = &proxy_data.response_headers {
+        for (key, value) in custom_headers
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+        {
+            if let Some(value_str) = value.as_str() {
+                response.insert_header((key.as_str(), value_str));
+            }
+        }
+    }
+
+    Ok(response.body(resp_bytes))
+}
+
 /// Shared URL-building logic used by generate_url and generate_encrypted_or_encoded_url.
 ///
 /// Encrypted tokens use Python's path format: `{base}/_token_{token}{endpoint_path}`.
@@ -403,7 +657,13 @@ const IP_LOOKUP_SERVICES: &[(&str, &str)] = &[
     ("https://httpbin.org/ip", "origin"),
 ];
 
-pub async fn get_public_ip(stream_manager: web::Data<StreamManager>) -> AppResult<HttpResponse> {
+pub async fn get_public_ip(
+    stream_manager: web::Data<StreamManager>,
+    forward_cfg: web::Data<ForwardConfig>,
+) -> AppResult<HttpResponse> {
+    if let Some(ref ip) = forward_cfg.public_ip {
+        return Ok(HttpResponse::Ok().json(serde_json::json!({ "ip": ip })));
+    }
     for (url, key) in IP_LOOKUP_SERVICES {
         match stream_manager
             .make_request((*url).to_string(), HeaderMap::new())

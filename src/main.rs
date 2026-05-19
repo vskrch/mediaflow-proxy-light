@@ -89,6 +89,31 @@ async fn main() -> std::io::Result<()> {
 
     let auth_middleware = AuthMiddleware::new(config.auth.api_password.clone());
     let stream_manager = StreamManager::new(config.proxy.clone());
+
+    // Resolve MediaFlow's public IP for {mediaflow_ip} placeholder substitution.
+    // Use configured value if present; otherwise auto-detect via ipify/checkip.
+    let mut forward_cfg = config.forward.clone();
+    if forward_cfg.public_ip.is_none() {
+        let ip_detect_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok();
+        if let Some(client) = ip_detect_client {
+            'detect: for url in &["https://api.ipify.org", "https://checkip.amazonaws.com"] {
+                if let Ok(resp) = client.get(*url).send().await {
+                    if let Ok(text) = resp.text().await {
+                        let ip = text.trim().to_string();
+                        if !ip.is_empty() {
+                            tracing::info!("Detected public IP: {ip}");
+                            forward_cfg.public_ip = Some(ip);
+                            break 'detect;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let forward_config = web::Data::new(forward_cfg);
     let server_config = Arc::new(config.clone());
     let app_metrics = AppMetrics::new();
 
@@ -153,7 +178,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(stream_manager.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(metrics))
-            .app_data(epg_cache.clone());
+            .app_data(epg_cache.clone())
+            .app_data(forward_config.clone());
 
         // MPD bytes cache — register before route setup so handlers can extract it
         #[cfg(feature = "mpd")]
@@ -387,6 +413,8 @@ async fn main() -> std::io::Result<()> {
                     )
                     .route("/generate_url", web::post().to(handler::generate_url))
                     .route("/ip", web::get().to(handler::get_public_ip))
+                    // Generic HTTP forward — any method, any body, transparent relay
+                    .route("/forward", web::route().to(handler::proxy_forward))
                     // EPG proxy — XMLTV pass-through with caching (Channels DVR & all providers)
                     .route("/epg", web::get().to(epg_proxy_handler))
                     .route("/epg", web::head().to(epg_proxy_handler)),

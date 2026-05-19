@@ -268,6 +268,57 @@ impl StreamManager {
         Ok(response)
     }
 
+    /// Forward an arbitrary HTTP request (any method + body) to `url` and return the full response.
+    ///
+    /// Unlike `make_request_raw` (GET-only, errors on 4xx/5xx), this method passes through any
+    /// status code verbatim so the caller can relay it back to the client.
+    pub async fn forward_request(
+        &self,
+        method: reqwest::Method,
+        url: String,
+        headers: reqwest::header::HeaderMap,
+        body: bytes::Bytes,
+    ) -> AppResult<Response> {
+        let proxy_config = self.proxy_router.get_proxy_config(&url);
+        let client = if let Some(route_config) = proxy_config {
+            let cache_key = format!(
+                "{}|{}|{}",
+                route_config.proxy,
+                route_config.proxy_url.as_deref().unwrap_or(""),
+                route_config.verify_ssl,
+            );
+            if let Some(cached) = self.route_clients.get(&cache_key) {
+                cached.clone()
+            } else {
+                let new_client = Self::build_route_client(&self.config, &route_config)?;
+                self.route_clients.insert(cache_key, new_client.clone());
+                new_client
+            }
+        } else {
+            self.thread_client()
+        };
+
+        let header_timeout =
+            Duration::from_secs(self.config.connect_timeout * self.config.request_timeout_factor);
+
+        let mut req = client.request(method, &url).headers(headers);
+        if !body.is_empty() {
+            req = req.body(body);
+        }
+
+        let response = timeout(header_timeout, req.send())
+            .await
+            .map_err(|_| {
+                AppError::Proxy(format!(
+                    "Request timed out after {} s waiting for response headers from {url}",
+                    header_timeout.as_secs()
+                ))
+            })?
+            .map_err(|e| AppError::Proxy(format!("Failed to connect to upstream: {}", e)))?;
+
+        Ok(response)
+    }
+
     /// Fetch all response bytes into memory (for small resources like M3U8 playlists / MPD manifests).
     ///
     /// A separate read timeout (`config.body_read_timeout`, default 60s) is
