@@ -34,16 +34,14 @@ use crate::{
 // Stream handler (GET + HEAD)
 // ---------------------------------------------------------------------------
 
-/// Stream or probe a Telegram document identified by `file_id` + `file_size`.
+/// Stream or probe a Telegram document.
 ///
-/// Required query params:
-/// - `file_id`   — Bot API file_id
-/// - `file_size` — total byte size of the file (required for Range support)
-///
-/// Optional:
-/// - `chat_id`     — chat/channel ID or username (informational only at this layer)
-/// - `document_id` — Telegram document ID (informational only)
-/// - `message_id`  — message ID (informational only)
+/// Supports multiple resolution modes (priority order):
+/// 1. `d`/`url` — t.me URL (parsed to chat_id + message_id or file_id)
+/// 2. `chat_id` + `message_id` — fetches message fresh from Telegram API
+/// 3. `chat_id` + `document_id` — scans chat history
+/// 4. `chat_id` + `file_id` — decodes file_id to doc_id, then scans history
+/// 5. `file_id` + `file_size` — standalone (file_size required in this mode only)
 pub async fn telegram_stream_handler(
     req: HttpRequest,
     config: web::Data<Arc<Config>>,
@@ -58,48 +56,45 @@ pub async fn telegram_stream_handler(
             .map(|q| q.into_inner())
             .unwrap_or_default();
 
-    // --- Resolve file_id -------------------------------------------------
-    let file_id_str = query
-        .get("file_id")
-        .cloned()
-        .ok_or_else(|| AppError::BadRequest("Missing required parameter: file_id".into()))?;
-
-    let file_size: u64 = query
-        .get("file_size")
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| {
-            AppError::BadRequest("Missing or invalid required parameter: file_size".into())
-        })?;
-
-    if file_size == 0 {
-        return Err(AppError::BadRequest("file_size must be > 0".into()));
-    }
-
-    let decoded = decode_file_id(&file_id_str)
-        .ok_or_else(|| AppError::BadRequest("Cannot decode file_id".into()))?;
-
-    // Optional params for file_reference refresh
-    let chat_id_opt = query.get("chat_id").cloned();
+    // --- Parse all query params as optional ------------------------------
+    let url_param = query.get("d").or_else(|| query.get("url")).cloned();
+    let mut chat_id_opt = query.get("chat_id").cloned();
+    let mut message_id_opt: Option<i32> = query.get("message_id").and_then(|v| v.parse().ok());
     let document_id_opt: Option<i64> = query.get("document_id").and_then(|v| v.parse().ok());
-    let message_id_opt: Option<i32> = query.get("message_id").and_then(|v| v.parse().ok());
+    let mut file_id_opt = query.get("file_id").cloned();
+    let file_size_opt: Option<u64> = query.get("file_size").and_then(|v| v.parse().ok());
 
-    // --- Parse Range header -----------------------------------------------
-    let range_header = req
-        .headers()
-        .get("range")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let (start, end) = parse_range(range_header.as_deref(), file_size);
-
-    tracing::debug!(
-        "tg handler: file_size={} range_header={:?} parsed start={} end={} content_length={}",
-        file_size,
-        range_header,
-        start,
-        end,
-        end - start + 1
-    );
+    // --- Step 1: Parse t.me URL if provided ------------------------------
+    if let Some(ref url) = url_param {
+        match parse_telegram_url(url) {
+            Some(crate::telegram::media_ref::TelegramMediaRef::Message { chat, message_id }) => {
+                use crate::telegram::media_ref::TelegramChat;
+                let effective_chat = match chat {
+                    TelegramChat::Id(id) if id > 0 => format!("-100{}", id),
+                    TelegramChat::Id(id) => id.to_string(),
+                    TelegramChat::Username(u) => u,
+                };
+                // URL values take priority over query params
+                if chat_id_opt.is_none() {
+                    chat_id_opt = Some(effective_chat);
+                }
+                if message_id_opt.is_none() {
+                    message_id_opt = Some(message_id as i32);
+                }
+            }
+            Some(crate::telegram::media_ref::TelegramMediaRef::FileId(fid)) => {
+                if file_id_opt.is_none() {
+                    file_id_opt = Some(fid);
+                }
+            }
+            None => {
+                return Err(AppError::BadRequest(format!(
+                    "Cannot parse Telegram URL: {}",
+                    url
+                )));
+            }
+        }
+    }
 
     // --- Check Telegram config -------------------------------------------
     let tg_cfg = &config.telegram;
@@ -121,7 +116,8 @@ pub async fn telegram_stream_handler(
     {
         use crate::proxy::stream::ResponseStream;
         use crate::telegram::session::{
-            get_fresh_document_info, get_or_init_client, stream_document_range,
+            get_fresh_document_info, get_location_from_message_id, get_or_init_client,
+            stream_document_range, FreshFileLocation,
         };
         use grammers_tl_types as tl;
 
@@ -129,53 +125,172 @@ pub async fn telegram_stream_handler(
             .await
             .map_err(|e| AppError::Telegram(format!("Telegram connect failed: {}", e)))?;
 
-        // --- Resolve fresh document info when chat context is provided ------
-        // The file_reference AND access_hash embedded in a Bot API file_id are
-        // bot-session-specific and expire.  When chat_id + document_id are supplied
-        // (e.g. by MediaFusion / Stremio), we scan the chat history to obtain
-        // current values from our own user MTProto session.
-        let (file_reference, access_hash, dc_id) =
-            if let (Some(chat_id), Some(doc_id)) = (&chat_id_opt, document_id_opt) {
-                match get_fresh_document_info(client.clone(), chat_id, doc_id, message_id_opt, 200)
-                    .await
-                {
-                    Some(info) => (info.file_reference, info.access_hash, info.dc_id),
-                    None => {
-                        tracing::warn!(
-                            "Could not find document_id={} in chat history; \
-                             falling back to file_id embedded values",
-                            doc_id
-                        );
-                        (
-                            decoded.file_reference.clone(),
-                            decoded.access_hash,
-                            decoded.dc_id,
+        // --- Step 2: Resolve to a file location --------------------------
+        enum Resolved {
+            Fresh(FreshFileLocation),
+            /// file_id-only mode: use decoded fields + caller-supplied file_size
+            FileIdDirect {
+                doc_id: i64,
+                access_hash: i64,
+                file_reference: Vec<u8>,
+                dc_id: i32,
+                file_size: u64,
+            },
+        }
+
+        let resolved: Resolved = if let (Some(chat_id), Some(msg_id)) =
+            (&chat_id_opt, message_id_opt)
+        {
+            // Mode 2: chat_id + message_id → fetch fresh from Telegram
+            match get_location_from_message_id(client.clone(), chat_id, msg_id).await {
+                Some(loc) => Resolved::Fresh(loc),
+                None => {
+                    return Err(AppError::NotFound(format!(
+                        "No document found in message_id={} chat={}",
+                        msg_id, chat_id
+                    )));
+                }
+            }
+        } else if let (Some(chat_id), Some(doc_id)) = (&chat_id_opt, document_id_opt) {
+            // Mode 3: chat_id + document_id → scan history
+            match get_fresh_document_info(client.clone(), chat_id, doc_id, None, 200).await {
+                Some(loc) => Resolved::Fresh(loc),
+                None => {
+                    return Err(AppError::NotFound(format!(
+                        "document_id={} not found in chat={}",
+                        doc_id, chat_id
+                    )));
+                }
+            }
+        } else if let (Some(chat_id), Some(ref fid)) = (&chat_id_opt, &file_id_opt) {
+            // Mode 4: chat_id + file_id → decode file_id to get doc_id, scan history
+            let decoded = decode_file_id(fid)
+                .ok_or_else(|| AppError::BadRequest("Cannot decode file_id".into()))?;
+            match get_fresh_document_info(client.clone(), chat_id, decoded.id, None, 200).await {
+                Some(loc) => Resolved::Fresh(loc),
+                None => {
+                    // Fallback: use file_id embedded values but file_size is required
+                    let fs = file_size_opt.ok_or_else(|| {
+                        AppError::BadRequest(
+                            "document not found in chat history and file_size not provided \
+                                 for file_id fallback"
+                                .into(),
                         )
+                    })?;
+                    if fs == 0 {
+                        return Err(AppError::BadRequest("file_size must be > 0".into()));
+                    }
+                    tracing::warn!(
+                        "Could not find document_id={} in chat history; \
+                             falling back to file_id embedded values",
+                        decoded.id
+                    );
+                    Resolved::FileIdDirect {
+                        doc_id: decoded.id,
+                        access_hash: decoded.access_hash,
+                        file_reference: decoded.file_reference,
+                        dc_id: decoded.dc_id,
+                        file_size: fs,
                     }
                 }
-            } else {
-                (
-                    decoded.file_reference.clone(),
-                    decoded.access_hash,
-                    decoded.dc_id,
+            }
+        } else if let Some(ref fid) = file_id_opt {
+            // Mode 5: file_id + file_size (standalone)
+            let fs = file_size_opt.ok_or_else(|| {
+                AppError::BadRequest(
+                    "file_size is required when using file_id without chat_id".into(),
                 )
+            })?;
+            if fs == 0 {
+                return Err(AppError::BadRequest("file_size must be > 0".into()));
+            }
+            let decoded = decode_file_id(fid)
+                .ok_or_else(|| AppError::BadRequest("Cannot decode file_id".into()))?;
+            Resolved::FileIdDirect {
+                doc_id: decoded.id,
+                access_hash: decoded.access_hash,
+                file_reference: decoded.file_reference,
+                dc_id: decoded.dc_id,
+                file_size: fs,
+            }
+        } else {
+            return Err(AppError::BadRequest(
+                "No resolvable parameters provided. Supported modes: \
+                     (1) d/url=<t.me URL>, \
+                     (2) chat_id + message_id, \
+                     (3) chat_id + document_id, \
+                     (4) chat_id + file_id, \
+                     (5) file_id + file_size"
+                    .into(),
+            ));
+        };
+
+        // --- Step 3: Extract location fields and file metadata -----------
+        let (doc_id, access_hash, file_reference, dc_id, file_size, mime_opt, fname_opt) =
+            match resolved {
+                Resolved::Fresh(loc) => (
+                    loc.document_id,
+                    loc.access_hash,
+                    loc.file_reference,
+                    loc.dc_id,
+                    loc.file_size,
+                    Some(loc.mime_type),
+                    loc.file_name,
+                ),
+                Resolved::FileIdDirect {
+                    doc_id,
+                    access_hash,
+                    file_reference,
+                    dc_id,
+                    file_size,
+                } => (
+                    doc_id,
+                    access_hash,
+                    file_reference,
+                    dc_id,
+                    file_size,
+                    None,
+                    None,
+                ),
             };
 
         // --- Build file location -----------------------------------------
         let location = tl::enums::InputFileLocation::InputDocumentFileLocation(
             tl::types::InputDocumentFileLocation {
-                id: decoded.id,
+                id: doc_id,
                 access_hash,
                 file_reference,
                 thumb_size: String::new(),
             },
         );
 
-        // --- Determine MIME type from path / file_id type ----------------
-        let filename = req.match_info().get("filename").unwrap_or("stream.mkv");
-        let mime = mime_guess::from_path(filename)
-            .first_or_octet_stream()
-            .to_string();
+        // --- Determine MIME type -----------------------------------------
+        // Priority: from document attributes → from path/filename param → octet-stream
+        let path_filename = req.match_info().get("filename").unwrap_or("stream.mkv");
+        let effective_filename = fname_opt.as_deref().unwrap_or(path_filename);
+        let mime = mime_opt.unwrap_or_else(|| {
+            mime_guess::from_path(effective_filename)
+                .first_or_octet_stream()
+                .to_string()
+        });
+
+        // --- Parse Range header ------------------------------------------
+        let range_header = req
+            .headers()
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let (start, end) = parse_range(range_header.as_deref(), file_size);
+
+        tracing::debug!(
+            "tg handler: file_size={} range_header={:?} parsed start={} end={} content_length={}",
+            file_size,
+            range_header,
+            start,
+            end,
+            end - start + 1
+        );
 
         // --- Build response headers --------------------------------------
         let content_length = end - start + 1;

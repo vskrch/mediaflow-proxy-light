@@ -218,16 +218,20 @@ pub async fn resolve_peer_from_str(client: &Client, chat_id: &str) -> Option<tl:
     }
 }
 
-/// Fresh document info obtained from the user's own MTProto session.
+/// Fresh file location obtained from the user's own MTProto session.
 /// All fields come from the same `Document` object so they're consistent.
 #[cfg(feature = "telegram")]
-pub struct FreshDocumentInfo {
-    pub file_reference: Vec<u8>,
+pub struct FreshFileLocation {
+    pub document_id: i64,
     pub access_hash: i64,
+    pub file_reference: Vec<u8>,
     pub dc_id: i32,
+    pub file_size: u64,
+    pub mime_type: String,
+    pub file_name: Option<String>,
 }
 
-/// Extract a full `FreshDocumentInfo` for `document_id` from a `messages::Messages` result.
+/// Extract a full `FreshFileLocation` for `document_id` from a `messages::Messages` result.
 /// Returns ALL fields from the found document, not just file_reference, because:
 /// - `access_hash` in a Bot API file_id is bot-session-specific (won't work for user MTProto)
 /// - `dc_id` from the message document is authoritative
@@ -235,7 +239,7 @@ pub struct FreshDocumentInfo {
 fn extract_doc_info_from_msgs(
     result: &tl::enums::messages::Messages,
     document_id: i64,
-) -> Option<FreshDocumentInfo> {
+) -> Option<FreshFileLocation> {
     let messages: &[tl::enums::Message] = match result {
         tl::enums::messages::Messages::Messages(m) => &m.messages,
         tl::enums::messages::Messages::Slice(m) => &m.messages,
@@ -248,10 +252,21 @@ fn extract_doc_info_from_msgs(
             if let Some(tl::enums::MessageMedia::Document(md)) = &m.media {
                 if let Some(tl::enums::Document::Document(doc)) = &md.document {
                     if doc.id == document_id {
-                        return Some(FreshDocumentInfo {
+                        let file_name = doc.attributes.iter().find_map(|attr| {
+                            if let tl::enums::DocumentAttribute::Filename(f) = attr {
+                                Some(f.file_name.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        return Some(FreshFileLocation {
+                            document_id: doc.id,
                             file_reference: doc.file_reference.clone(),
                             access_hash: doc.access_hash,
                             dc_id: doc.dc_id,
+                            file_size: doc.size as u64,
+                            mime_type: doc.mime_type.clone(),
+                            file_name,
                         });
                     }
                 }
@@ -261,7 +276,98 @@ fn extract_doc_info_from_msgs(
     None
 }
 
-/// Obtain fresh document info (file_reference, access_hash, dc_id) by scanning chat history.
+/// Extract a `FreshFileLocation` for the first document found in a `messages::Messages` result.
+/// Used when resolving by message_id (no document_id filter needed).
+#[cfg(feature = "telegram")]
+fn extract_file_location_from_msgs(
+    result: &tl::enums::messages::Messages,
+) -> Option<FreshFileLocation> {
+    let messages: &[tl::enums::Message] = match result {
+        tl::enums::messages::Messages::Messages(m) => &m.messages,
+        tl::enums::messages::Messages::Slice(m) => &m.messages,
+        tl::enums::messages::Messages::ChannelMessages(m) => &m.messages,
+        tl::enums::messages::Messages::NotModified(_) => return None,
+    };
+
+    for msg in messages {
+        if let tl::enums::Message::Message(m) = msg {
+            if let Some(tl::enums::MessageMedia::Document(md)) = &m.media {
+                if let Some(tl::enums::Document::Document(doc)) = &md.document {
+                    let file_name = doc.attributes.iter().find_map(|attr| {
+                        if let tl::enums::DocumentAttribute::Filename(f) = attr {
+                            Some(f.file_name.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    return Some(FreshFileLocation {
+                        document_id: doc.id,
+                        file_reference: doc.file_reference.clone(),
+                        access_hash: doc.access_hash,
+                        dc_id: doc.dc_id,
+                        file_size: doc.size as u64,
+                        mime_type: doc.mime_type.clone(),
+                        file_name,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Obtain a fresh file location by fetching a specific message from Telegram.
+///
+/// Used when message_id is known — fetches the exact message and extracts
+/// the first document from it.
+#[cfg(feature = "telegram")]
+pub async fn get_location_from_message_id(
+    client: Arc<Client>,
+    chat_id: &str,
+    message_id: i32,
+) -> Option<FreshFileLocation> {
+    let peer = resolve_peer_from_str(&client, chat_id).await?;
+
+    let input_msg = tl::enums::InputMessage::Id(tl::types::InputMessageId { id: message_id });
+
+    let result = match &peer {
+        tl::enums::InputPeer::Channel(ch) => client
+            .invoke(&tl::functions::channels::GetMessages {
+                channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id: ch.channel_id,
+                    access_hash: ch.access_hash,
+                }),
+                id: vec![input_msg],
+            })
+            .await
+            .ok()?,
+        _ => client
+            .invoke(&tl::functions::messages::GetMessages {
+                id: vec![input_msg],
+            })
+            .await
+            .ok()?,
+    };
+
+    let loc = extract_file_location_from_msgs(&result);
+    if let Some(ref l) = loc {
+        info!(
+            "Got fresh file location via GetMessages (message_id={}): doc_id={} dc={} fref={}",
+            message_id,
+            l.document_id,
+            l.dc_id,
+            hex::encode(&l.file_reference),
+        );
+    } else {
+        warn!(
+            "No document found in message_id={} chat={}",
+            message_id, chat_id
+        );
+    }
+    loc
+}
+
+/// Obtain fresh document info (file_reference, access_hash, dc_id, etc.) by scanning chat history.
 ///
 /// Strategy:
 /// 1. If `message_id` is provided, try `messages.GetMessages` first (fast path).
@@ -275,7 +381,7 @@ pub async fn get_fresh_document_info(
     document_id: i64,
     message_id: Option<i32>,
     scan_limit: usize,
-) -> Option<FreshDocumentInfo> {
+) -> Option<FreshFileLocation> {
     let peer = resolve_peer_from_str(&client, chat_id).await?;
 
     // Fast path: direct lookup if we have the message_id
@@ -290,10 +396,11 @@ pub async fn get_fresh_document_info(
         {
             if let Some(info) = extract_doc_info_from_msgs(&result, document_id) {
                 info!(
-                    "Got fresh doc info via GetMessages (message_id={}): fref={}, dc={}",
+                    "Got fresh doc info via GetMessages (message_id={}): fref={}, dc={}, doc_id={}",
                     mid,
                     hex::encode(&info.file_reference),
-                    info.dc_id
+                    info.dc_id,
+                    info.document_id,
                 );
                 return Some(info);
             }
@@ -342,11 +449,12 @@ pub async fn get_fresh_document_info(
             Ok(result) => {
                 if let Some(info) = extract_doc_info_from_msgs(&result, document_id) {
                     info!(
-                        "Got fresh doc info via history scan (batch {}): fref={}, dc={}, access_hash={}",
+                        "Got fresh doc info via history scan (batch {}): fref={}, dc={}, access_hash={}, doc_id={}",
                         batch_idx,
                         hex::encode(&info.file_reference),
                         info.dc_id,
-                        info.access_hash
+                        info.access_hash,
+                        info.document_id,
                     );
                     return Some(info);
                 }

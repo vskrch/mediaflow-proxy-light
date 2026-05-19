@@ -81,8 +81,21 @@ See [Xtream Codes proxy](xtream.md).
 | Path | Description |
 |---|---|
 | `/proxy/telegram/stream` | Stream Telegram media |
-| `/proxy/telegram/info` | Media info |
-| `/proxy/telegram/status` | Connection status |
+| `/proxy/telegram/stream/<filename>` | Stream with filename hint for players |
+| `/proxy/telegram/info` | Media metadata (size, MIME type, filename) |
+| `/proxy/telegram/status` | Session connection status |
+
+**Identification parameters** (use one combination per request):
+
+| Params | Mode |
+|---|---|
+| `d=<t.me URL>` | Public or private `t.me` link |
+| `chat_id` + `message_id` | Recommended — fresh reference, never expires |
+| `chat_id` + `document_id` | Scans recent chat history |
+| `chat_id` + `file_id` | Decodes file_id to find document in chat |
+| `file_id` + `file_size` | Standalone Bot-API file_id (file_size required) |
+
+See [Telegram setup & usage](telegram.md) for full details and examples.
 
 Transcoded variants:
 

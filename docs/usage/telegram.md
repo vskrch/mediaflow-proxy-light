@@ -89,9 +89,72 @@ A healthy response looks like:
 
 ## Usage
 
-With the Telegram proxy active, you can stream any Telegram video by passing its URL or message reference to the `/proxy/telegram/stream` endpoint. The URL Generator's **Telegram** tab builds these URLs for you — paste a `t.me` link, choose your options, and copy the generated proxy URL.
+With the Telegram proxy active, stream any Telegram video by calling `/proxy/telegram/stream`. The URL Generator's **Telegram** tab builds these URLs for you — paste a `t.me` link or message reference, choose your options, and copy the result.
 
-See [Usage — Overview](overview.md) for the full endpoint reference.
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/HEAD` | `/proxy/telegram/stream` | Stream Telegram media |
+| `GET/HEAD` | `/proxy/telegram/stream/<filename>` | Stream with filename hint for players |
+| `GET` | `/proxy/telegram/info` | Get media metadata (size, MIME type, filename) |
+| `GET` | `/proxy/telegram/status` | Session connection status |
+
+### Stream parameters
+
+The stream endpoint supports five ways to identify the media, tried in the order listed:
+
+| Priority | Required params | Optional extras | Notes |
+|---|---|---|---|
+| 1 | `d=<t.me URL>` | — | Accepts `https://t.me/channel/123` (public) or `https://t.me/c/123456789/456` (private) |
+| 2 | `chat_id` + `message_id` | — | **Recommended.** Fetches a fresh file reference directly — never expires |
+| 3 | `chat_id` + `document_id` | `message_id` | Scans recent chat history to find the document |
+| 4 | `chat_id` + `file_id` | `file_size` | Decodes `file_id` to resolve the document; falls back to embedded reference if `file_size` is also supplied |
+| 5 | `file_id` + `file_size` | — | Standalone Bot-API file_id; `file_size` is required for range/seek support |
+
+All modes also accept `api_password` when authentication is enabled.
+
+#### Why modes 2–4 are better than `file_id` alone
+
+A `file_id` contains a `file_reference` that is tied to the bot session that issued it — it expires and cannot be refreshed from a different session. When you supply `chat_id` + `message_id` (or `document_id`), the proxy fetches the message directly via MTProto and obtains a fresh reference from your own session, which never produces a *file reference expired* error.
+
+### Examples
+
+```bash
+# Mode 1 — t.me public link
+curl -OJ "http://localhost:8888/proxy/telegram/stream?d=https://t.me/mychannel/42&api_password=secret"
+
+# Mode 1 — t.me private channel link
+curl -OJ "http://localhost:8888/proxy/telegram/stream?d=https://t.me/c/1234567890/42&api_password=secret"
+
+# Mode 2 — chat_id + message_id (recommended, never expires)
+mpv "http://localhost:8888/proxy/telegram/stream?chat_id=-1001234567890&message_id=42&api_password=secret"
+
+# Mode 3 — chat_id + document_id
+mpv "http://localhost:8888/proxy/telegram/stream?chat_id=-1001234567890&document_id=5678901234&api_password=secret"
+
+# Mode 5 — standalone file_id (requires file_size)
+mpv "http://localhost:8888/proxy/telegram/stream?file_id=BQACAgIAAxkB...&file_size=734003200&api_password=secret"
+
+# Get media info before streaming
+curl "http://localhost:8888/proxy/telegram/info?chat_id=-1001234567890&message_id=42&api_password=secret"
+```
+
+### `/proxy/telegram/info` parameters
+
+Accepts the same identification parameters as the stream endpoint (`d`, `chat_id`+`message_id`, `chat_id`+`document_id`, `file_id`). Returns:
+
+```json
+{
+  "file_size": 734003200,
+  "mime_type": "video/mp4",
+  "file_name": "movie.mp4",
+  "duration": 5400,
+  "width": 1920,
+  "height": 1080,
+  "dc_id": 4
+}
+```
 
 ---
 
