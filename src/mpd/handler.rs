@@ -292,23 +292,27 @@ pub async fn mpd_playlist_handler(
     // For SegmentBase profiles with a SIDX index range, expand the single large-file
     // segment into per-fragment segments so seeking works without re-downloading from
     // the start of the file.
-    if let Some(profile_mut) = parsed.profiles.iter_mut().find(|p| p.id == profile_id) {
+    for profile_mut in parsed.profiles.iter_mut().filter(|p| p.id == profile_id) {
         expand_segment_base_segments(profile_mut, &stream_manager, request_headers.clone()).await;
     }
 
-    // Find the profile (immutable borrow for playlist building)
-    let profile = parsed
+    // Collect all period-profiles with the matching ID (multi-period MPDs produce one per period).
+    let matching: Vec<&MpdProfile> = parsed
         .profiles
         .iter()
-        .find(|p| p.id == profile_id)
-        .ok_or_else(|| AppError::Mpd(format!("Profile {profile_id} not found in MPD")))?;
+        .filter(|p| p.id == profile_id)
+        .collect();
+
+    if matching.is_empty() {
+        return Err(AppError::Mpd(format!("Profile {profile_id} not found in MPD")));
+    }
 
     // Parse start_offset
     let start_offset: Option<f64> = query.get("start_offset").and_then(|v| v.parse().ok());
 
     let hls = build_hls_media_playlist(
         &parsed,
-        profile,
+        &matching,
         &proxy_base,
         &destination,
         &params,

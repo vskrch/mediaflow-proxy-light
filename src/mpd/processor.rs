@@ -1031,10 +1031,15 @@ pub fn build_hls_master(
     hls.join("\n")
 }
 
-/// Build the HLS media playlist for a specific profile.
+/// Build the HLS media playlist for one or more profiles (multi-period support).
+///
+/// Multi-period MPDs produce multiple [`MpdProfile`] entries with the same `id` (one per
+/// period). All matching profiles must be passed so their segments are merged into a single
+/// contiguous playlist before depth-trimming is applied. Passing a single-element slice is
+/// identical to the old single-profile behaviour.
 pub fn build_hls_media_playlist(
     parsed: &ParsedMpd,
-    profile: &MpdProfile,
+    profiles: &[&MpdProfile],
     proxy_base: &str,
     _mpd_url: &str,
     params: &MpdProxyParams,
@@ -1048,9 +1053,20 @@ pub fn build_hls_media_playlist(
 
     let mut hls = vec!["#EXTM3U".to_string(), format!("#EXT-X-VERSION:{version}")];
 
-    let segments = &profile.segments;
-    if segments.is_empty() {
-        warn!("No segments for profile {}", profile.id);
+    // Merge segments from all period-profiles into a single ordered list.
+    // Depth trimming must be applied to the combined list, not per-period.
+    let mut merged: Vec<(&MpdSegment, &MpdProfile)> = Vec::new();
+    for profile in profiles {
+        if profile.segments.is_empty() {
+            warn!("No segments for profile {}", profile.id);
+            continue;
+        }
+        for seg in &profile.segments {
+            merged.push((seg, profile));
+        }
+    }
+
+    if merged.is_empty() {
         return hls.join("\n");
     }
 
@@ -1068,11 +1084,11 @@ pub fn build_hls_media_playlist(
         ));
     }
 
-    // Trim to live playlist depth
-    let trimmed: &[MpdSegment] = if is_live {
-        let extinf_vals: Vec<f64> = segments
+    // Trim to live playlist depth (applied once to the combined segment list)
+    let trimmed: &[(&MpdSegment, &MpdProfile)] = if is_live {
+        let extinf_vals: Vec<f64> = merged
             .iter()
-            .filter_map(|s| if s.extinf > 0.0 { Some(s.extinf) } else { None })
+            .filter_map(|(s, _)| if s.extinf > 0.0 { Some(s.extinf) } else { None })
             .collect();
         let depth = compute_live_playlist_depth(
             is_ts_mode,
@@ -1080,20 +1096,22 @@ pub fn build_hls_media_playlist(
             configured_depth,
             &extinf_vals,
         );
-        let start = segments.len().saturating_sub(depth);
-        &segments[start..]
+        let start = merged.len().saturating_sub(depth);
+        &merged[start..]
     } else {
-        segments
+        &merged
     };
 
     if trimmed.is_empty() {
         return hls.join("\n");
     }
 
+    let (first_seg, first_profile) = trimmed[0];
+
     // TARGETDURATION and MEDIA-SEQUENCE
     let extinf_vals: Vec<f64> = trimmed
         .iter()
-        .filter_map(|s| if s.extinf > 0.0 { Some(s.extinf) } else { None })
+        .filter_map(|(s, _)| if s.extinf > 0.0 { Some(s.extinf) } else { None })
         .collect();
     let target_duration = if is_ts_mode {
         extinf_vals.iter().cloned().fold(0.0f64, f64::max).ceil() as u64 + 1
@@ -1102,9 +1120,10 @@ pub fn build_hls_media_playlist(
     };
 
     let sequence = if is_live {
-        compute_live_media_sequence(&trimmed[0], profile, trimmed)
+        // Pass the first profile's full segment list for nominal-duration computation
+        compute_live_media_sequence(first_seg, first_profile, &first_profile.segments)
     } else {
-        trimmed[0].number.max(1)
+        first_seg.number.max(1)
     };
 
     hls.push(format!("#EXT-X-TARGETDURATION:{target_duration}"));
@@ -1117,18 +1136,6 @@ pub fn build_hls_media_playlist(
     // Serving init via a dedicated /init endpoint avoids re-sending the moov
     // on every segment request and lets ffmpeg/players cache the init separately.
     let use_map = !is_ts_mode;
-    if use_map {
-        if let Some(init_url) = &profile.init_url {
-            let map_url = build_init_url(
-                proxy_base,
-                init_url,
-                &profile.mime_type,
-                profile.init_range.as_deref(),
-                params,
-            );
-            hls.push(format!("#EXT-X-MAP:URI=\"{map_url}\""));
-        }
-    }
 
     // Segment lines
     let mut skip_filter = if !skip_ranges.is_empty() {
@@ -1137,8 +1144,9 @@ pub fn build_hls_media_playlist(
         None
     };
     let mut need_discontinuity = false;
+    let mut current_init_url: Option<&str> = None;
 
-    for segment in trimmed {
+    for (segment, profile) in trimmed {
         let duration = segment.extinf;
 
         // Skip filter
@@ -1146,6 +1154,29 @@ pub fn build_hls_media_playlist(
             if sf.check_and_advance(duration) {
                 need_discontinuity = true;
                 continue;
+            }
+        }
+
+        // Emit EXT-X-MAP when init URL changes (first segment or period boundary)
+        if use_map {
+            let this_init = profile.init_url.as_deref().unwrap_or("");
+            if Some(this_init) != current_init_url {
+                if current_init_url.is_some() {
+                    // Period boundary: discontinuity before new init
+                    hls.push("#EXT-X-DISCONTINUITY".to_string());
+                    need_discontinuity = false;
+                }
+                current_init_url = Some(this_init);
+                if !this_init.is_empty() {
+                    let map_url = build_init_url(
+                        proxy_base,
+                        this_init,
+                        &profile.mime_type,
+                        profile.init_range.as_deref(),
+                        params,
+                    );
+                    hls.push(format!("#EXT-X-MAP:URI=\"{map_url}\""));
+                }
             }
         }
 
