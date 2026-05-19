@@ -462,8 +462,7 @@ pub async fn get_fresh_document_info(
 
     // Fast path: direct lookup if we have the message_id (channel-aware)
     if let Some(mid) = message_id {
-        let input_msg =
-            tl::enums::InputMessage::Id(tl::types::InputMessageId { id: mid });
+        let input_msg = tl::enums::InputMessage::Id(tl::types::InputMessageId { id: mid });
         let fast_result = match &peer {
             tl::enums::InputPeer::Channel(ch) => client
                 .invoke(&tl::functions::channels::GetMessages {

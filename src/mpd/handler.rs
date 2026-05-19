@@ -304,7 +304,9 @@ pub async fn mpd_playlist_handler(
         .collect();
 
     if matching.is_empty() {
-        return Err(AppError::Mpd(format!("Profile {profile_id} not found in MPD")));
+        return Err(AppError::Mpd(format!(
+            "Profile {profile_id} not found in MPD"
+        )));
     }
 
     // Parse start_offset
