@@ -145,6 +145,29 @@ enabled       = true
 prefer_gpu    = true    # Use NVENC / VideoToolbox / VAAPI when available
 video_bitrate = "4M"
 audio_bitrate = 192000
+
+# ===========================================================================
+# Generic HTTP forward proxy (/proxy/forward)
+# ===========================================================================
+[forward]
+# Allowlist of hostnames. Empty = allow any host (default).
+allowed_hosts = []
+
+# Extra denied hostnames (private-IP SSRF guard is always active regardless).
+denied_hosts = []
+
+# Maximum incoming request body size in bytes (50 MB — covers NZB/torrent uploads).
+max_request_body_bytes = 52428800
+
+# Maximum upstream response body size in bytes (10 MB — typical API JSON).
+max_response_body_bytes = 10485760
+
+# Timeout (seconds) for reading the upstream response body.
+response_body_timeout_secs = 30
+
+# MediaFlow's public IP. Substituted for {mediaflow_ip} in forwarded requests.
+# Auto-detected at startup when empty (via api.ipify.org / checkip.amazonaws.com).
+public_ip = ""
 ```
 
 ---

@@ -92,6 +92,18 @@ Transcoded variants:
 | `/proxy/telegram/transcode/init.mp4` | fMP4 init segment |
 | `/proxy/telegram/transcode/segment.m4s` | fMP4 media segment |
 
+## Forward proxy
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST/PUT/PATCH/DELETE/…` | `/proxy/forward` | Transparent relay — forwards any request via MediaFlow's IP |
+
+**Parameters:** `d=<url>`, `api_password`, `h_<Name>=<value>` (outbound headers), `r_<Name>=<value>` (response header overrides).
+
+Use `{mediaflow_ip}` anywhere in `d` or the request body and MediaFlow substitutes its own public IP before forwarding — useful for debrid `ip=` binding.
+
+See [Forward proxy](forward.md) for full details.
+
 ## Utilities
 
 | Method | Path | Description |

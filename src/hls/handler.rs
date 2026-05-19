@@ -240,6 +240,7 @@ mod tests {
             transcode: TranscodeConfig::default(),
             epg: EpgConfig::default(),
             extractor: ExtractorConfig::default(),
+            forward: crate::config::ForwardConfig::default(),
             log_level: "info".to_string(),
         })
     }
