@@ -1,9 +1,4 @@
-# ---------------------------------------------------------------------------
-# GitHub Actions: Build Docker image and push to Heroku Container Registry
-# Release is done locally after the push to avoid extra CI deps.
-# ---------------------------------------------------------------------------
-
-name: Push Docker to Heroku
+name: Build & Push Docker to Heroku
 
 on:
   workflow_dispatch:
@@ -20,23 +15,19 @@ env:
   HEROKU_APP_NAME: agile-fjord-40325
 
 jobs:
-  build-and-push:
-    name: Build Docker & Push to Heroku Registry
+  push:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v5
 
-      - name: Resolve release version
+      - name: Resolve version
         id: version
-        run: |
-          VERSION="${{ github.event.inputs.release_version || '1.1.1' }}"
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+        run: echo "VERSION=${{ github.event.inputs.release_version || '1.1.1' }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Heroku Container Registry
+      - name: Login to Heroku
         uses: docker/login-action@v3
         with:
           registry: registry.heroku.com
@@ -52,13 +43,12 @@ jobs:
           push: true
           tags: |
             registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:latest
-            registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:${{ github.sha }}
           build-args: |
             RELEASE_VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=registry,ref=registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:buildcache
-          cache-to: type=registry,ref=registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:buildcache,mode=max
+          provenance: false
+          sbom: false
 
-      - name: Done
+      - name: Print release command
         run: |
-          echo "Image pushed. Run locally:"
+          echo "Image pushed! To release on Heroku run:"
           echo "  heroku container:release web --app ${{ env.HEROKU_APP_NAME }}"
