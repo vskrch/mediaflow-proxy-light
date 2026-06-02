@@ -25,4 +25,4 @@ ENV CONFIG_PATH=/app/config.toml
 
 EXPOSE 8888
 
-CMD ["/app/mediaflow-proxy-light"]
+CMD APP__SERVER__PORT=$PORT /app/mediaflow-proxy-light
