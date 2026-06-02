@@ -1,0 +1,14 @@
+# System packages required by the Rust build of mediaflow-proxy-light.
+# boring-sys2 (via rquest -> extractors) statically compiles BoringSSL using
+# bindgen + cmake + ninja, which needs:
+#   * clang + libclang-dev  — bindgen FFI generation
+#   * cmake + ninja-build   — BoringSSL build system
+#   * golang-go             — BoringSSL's boringssl.go fetches
+#   * perl                  — openssl-style generated source headers
+# Heroku-24 base image already provides: build-essential, git, python3, pkg-config.
+clang
+libclang-dev
+cmake
+ninja-build
+golang-go
+perl
