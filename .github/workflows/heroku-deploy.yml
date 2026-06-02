@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------------------
-# GitHub Actions: Deploy to Heroku Container Registry
+# GitHub Actions: Build Docker image and push to Heroku Container Registry
+# Release is done locally after the push to avoid extra CI deps.
 # ---------------------------------------------------------------------------
 
-name: Deploy to Heroku
+name: Push Docker to Heroku
 
 on:
   workflow_dispatch:
@@ -19,7 +20,8 @@ env:
   HEROKU_APP_NAME: agile-fjord-40325
 
 jobs:
-  deploy:
+  build-and-push:
+    name: Build Docker & Push to Heroku Registry
     runs-on: ubuntu-latest
 
     steps:
@@ -41,7 +43,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.HEROKU_API_KEY }}
 
-      - name: Build and push Docker image to Heroku
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -50,15 +52,13 @@ jobs:
           push: true
           tags: |
             registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:latest
+            registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:${{ github.sha }}
           build-args: |
             RELEASE_VERSION=${{ steps.version.outputs.VERSION }}
           cache-from: type=registry,ref=registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:buildcache
           cache-to: type=registry,ref=registry.heroku.com/${{ env.HEROKU_APP_NAME }}/web:buildcache,mode=max
 
-      - name: Release container on Heroku
-        uses: webfactory/heroku-cli-action@0.1.3
-        with:
-          herokuVersion: '8'
-          command: container:release web --app ${{ env.HEROKU_APP_NAME }}
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      - name: Done
+        run: |
+          echo "Image pushed. Run locally:"
+          echo "  heroku container:release web --app ${{ env.HEROKU_APP_NAME }}"
