@@ -1,0 +1,28 @@
+FROM alpine:3.21 AS downloader
+
+RUN apk add --no-cache curl ca-certificates
+
+ARG RELEASE_VERSION=1.1.1
+
+RUN curl -fL --retry 3 --retry-delay 2 \
+        -o /tmp/mediaflow-proxy-light \
+        "https://github.com/mhdzumair/MediaFlow-Proxy-Light/releases/download/${RELEASE_VERSION}/mediaflow-proxy-light-linux-x86_64" && \
+    chmod +x /tmp/mediaflow-proxy-light
+
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=downloader /tmp/mediaflow-proxy-light /app/
+COPY config-example.toml /app/config.toml
+
+ENV RUST_LOG=info
+ENV CONFIG_PATH=/app/config.toml
+
+EXPOSE 8888
+
+CMD ["/app/mediaflow-proxy-light"]
