@@ -47,7 +47,7 @@ hls = []
 mpd = []
 drm = []
 xtream = []
-extractors = []
+extractors = ["dep:rquest", "dep:rquest-util", "dep:scraper"]
 base64-url = []
 web-ui = ["dep:rust-embed", "dep:mime_guess"]
 redis = ["dep:deadpool-redis", "dep:redis"]
@@ -125,8 +125,12 @@ reqwest = { version = "0.12.28", default-features = false, features = ["stream",
 # Browser TLS/JA3 impersonation — used by extractors that hit Cloudflare-protected
 # hosts (e.g. DoodStream → playmogo.com). rquest is a reqwest fork with Chrome
 # fingerprint spoofing, equivalent to Python's curl_cffi with impersonate="chrome".
-rquest = { version = "5", default-features = false, features = ["full", "socks"] }
-rquest-util = "2"
+# Marked optional so deployments that disable the `extractors` feature (e.g.
+# Heroku, where boring-sys2's BoringSSL build needs system cmake/libclang the
+# buildpack doesn't ship) can drop the dep entirely.  Default features
+# (which include `extractors`) re-enable it.
+rquest = { version = "5", default-features = false, features = ["full", "socks"], optional = true }
+rquest-util = { version = "2", optional = true }
 
 # Crypto — AES-CBC for proxy-URL encryption, AES-CTR for CENC DRM, AES-GCM for F16Px
 aes = "0.8"
@@ -175,7 +179,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 moka = { version = "0.12", features = ["future"] }
 
 # HTML scraping for extractors (Phase 5)
-scraper = "0.20"
+scraper = { version = "0.20", optional = true }
 
 # ---------------------------------------------------------------------------
 # Optional / feature-gated dependencies
