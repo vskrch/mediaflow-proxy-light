@@ -1,0 +1,59 @@
+{
+  "name": "mediaflow-proxy-light",
+  "description": "High-performance Rust streaming proxy. Plug into MediaFusion as `mediaflow_proxy_url`.",
+  "repository": "https://github.com/vskrch/mediaflow-proxy-light",
+  "keywords": ["rust", "streaming", "proxy", "mediaflow", "mediafusion", "hls", "dash"],
+  "buildpacks": [
+    {
+      "url": "https://github.com/emk/heroku-buildpack-rust"
+    }
+  ],
+  "env": {
+    "APP__SERVER__HOST": {
+      "description": "Bind host. Must be 0.0.0.0 on Heroku.",
+      "value": "0.0.0.0",
+      "required": true
+    },
+    "APP__SERVER__PORT": {
+      "description": "Bind port. Heroku sets $PORT at runtime; this maps it to the app's expected var.",
+      "value": "$PORT",
+      "required": true
+    },
+    "APP__SERVER__WORKERS": {
+      "description": "Worker threads. Eco/Basic dynos have 1 vCPU — keep this at 1-2.",
+      "value": "1",
+      "required": false
+    },
+    "APP__AUTH__API_PASSWORD": {
+      "description": "Shared secret clients must pass as `api_password=<value>`. Generate with `openssl rand -base64 32`.",
+      "generator": "secret",
+      "required": true
+    },
+    "APP__LOG_LEVEL": {
+      "description": "tracing-subscriber filter. info for production, debug for diagnosing.",
+      "value": "info",
+      "required": false
+    },
+    "RUST_LOG": {
+      "description": "Overrides APP__LOG_LEVEL when set. Leave empty to use APP__LOG_LEVEL.",
+      "value": "",
+      "required": false
+    },
+    "APP__PROXY__FOLLOW_REDIRECTS": {
+      "description": "Follow upstream HTTP redirects.",
+      "value": "true",
+      "required": false
+    },
+    "APP__HLS__PREBUFFER_SEGMENTS": {
+      "description": "HLS segments to pre-fetch ahead of playback.",
+      "value": "3",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
